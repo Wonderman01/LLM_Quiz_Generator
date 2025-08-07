@@ -15,7 +15,10 @@ import json
 os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
 
 # Initialize Google model
-llm = GoogleGenerativeAI(model="gemini-pro", temperature=1)
+llm = GoogleGenerativeAI(model="gemini-2.5-flash", temperature=1)
+
+# Streamlit app layout
+st.set_page_config(layout="wide", initial_sidebar_state="auto")
 
 # Define Pydantic models
 class QuizQuestion(BaseModel):
@@ -53,6 +56,15 @@ def validate_concepts_in_pdf(concepts, pdf_text):
         if concept in pdf_text:
             valid_concepts.append(concept)
     return valid_concepts
+
+def extract_json_from_codeblock(text):
+    match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if match:
+        return match.group(1)
+    match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if match:
+        return match.group(1)
+    return text  # Return as-is if nothing found
 
 # Function to generate quiz
 def generate_questions_from_pdf(pdf_text, num_questions, quiz_type, quiz_context):
@@ -150,7 +162,6 @@ Explanation Guidelines:
 6. Relate the explanation to the broader context or topic when appropriate.
 7. Use simple language and avoid jargon unless it's essential to the subject matter.
 
-
 Use the following text as context for generating questions, but only if it's relevant to {quiz_context}:
 {pdf_text}
 """,
@@ -164,16 +175,15 @@ Use the following text as context for generating questions, but only if it's rel
         "pdf_text": pdf_text
     })
     
+    # Extract JSON from code block if present
+    json_str = extract_json_from_codeblock(result['text'])
     # Parse the JSON output
     try:
-        json_output = json.loads(result['text'])
+        json_output = json.loads(json_str)
         return Quiz(**json_output)
     except json.JSONDecodeError:
         st.error("Failed to generate a valid quiz. Please try again.")
         return None
-
-# Streamlit app layout
-st.set_page_config(layout="wide", initial_sidebar_state="auto")
 
 # Sidebar
 st.sidebar.title("📚 About the Quiz Generator")
@@ -212,36 +222,74 @@ if pdf_file is not None:
 
     num_questions = st.number_input("Enter the number of questions for the quiz:", min_value=1, value=5)
     quiz_type = st.selectbox("Select quiz type:", ["multiple-choice", "true-false"])
-    quiz_context_input = st.text_input("Enter topic(s)/context(s) for the quiz (comma separated):")
+    
+    # Choose between specific topics or entire material
+    mode = st.radio(
+        "What do you want to be tested on?",
+        ("Specific topics/concepts", "Entire material")
+    )
 
-if st.button("Generate Quiz"):
-    quiz_context_preprocessed = [concept.strip() for concept in quiz_context_input.split(',')]
-    
-    valid_concepts = validate_concepts_in_pdf(quiz_context_preprocessed, pdf_text)
-    
-    if valid_concepts:
-        for concept in valid_concepts:
-            st.success(f"Concept '{concept}' found in the PDF.")
-        selected_context = valid_concepts[0]  # Use the first valid concept
-        generated_quiz = generate_questions_from_pdf(pdf_text, num_questions, quiz_type, selected_context)
-        if generated_quiz:
-            st.session_state.generated_quiz = generated_quiz
-            st.session_state.current_question = 0
-            st.session_state.score = 0
+    if mode == "Specific topics/concepts":
+        quiz_context_input = st.text_input("Enter topic(s)/context(s) for the quiz (comma separated):")
     else:
-        for concept in quiz_context_preprocessed:
-            st.error(f"Concept '{concept}' not found in the PDF. Please enter valid topics.")
+        quiz_context_input = "entire material"
+        st.info("Quiz will be generated from the entire PDF content.")
+
+    if st.button("Generate Quiz"):
+        if mode == "Specific topics/concepts":
+            if quiz_context_input.strip():  # Check if input is not empty
+                quiz_context_preprocessed = [concept.strip() for concept in quiz_context_input.split(',')]
+                valid_concepts = validate_concepts_in_pdf(quiz_context_preprocessed, pdf_text)
+
+                if valid_concepts:
+                    for concept in valid_concepts:
+                        st.success(f"Concept '{concept}' found in the PDF. Generating quiz for this concept.")
+                    selected_context = valid_concepts[0]  # Use the first valid concept
+                    generated_quiz = generate_questions_from_pdf(pdf_text, num_questions, quiz_type, selected_context)
+
+                    if generated_quiz:
+                        st.session_state.generated_quiz = generated_quiz
+                        st.session_state.current_question = 0
+                        st.session_state.score = 0
+                        st.session_state.user_answers = []  # Track user answers
+                        st.session_state.answer_submitted = False
+                        st.rerun()  # Force rerun to display first question
+                else:
+                    for concept in quiz_context_preprocessed:
+                        st.error(f"Concept '{concept}' not found in the PDF. Please enter valid topics.")
+            else:
+                st.error("Please enter at least one topic/context for the quiz.")
+        
+        else:  # mode == "Entire material"
+            st.success("Generating quiz from the entire PDF content...")
+            # Use a general context that encompasses the whole document
+            selected_context = "all content from the document"
+            generated_quiz = generate_questions_from_pdf(pdf_text, num_questions, quiz_type, selected_context)
+            
+            if generated_quiz:
+                st.session_state.generated_quiz = generated_quiz
+                st.session_state.current_question = 0
+                st.session_state.score = 0
+                st.session_state.user_answers = []  # Track user answers
+                st.session_state.answer_submitted = False
+                st.rerun()  # Force rerun to display first question
+            else:
+                st.error("Failed to generate a quiz from the entire material. Please try again.")
 
 # Quiz display section
-if 'generated_quiz' in st.session_state:
+if 'generated_quiz' in st.session_state and 'current_question' in st.session_state:
     quiz = st.session_state.generated_quiz
     current_question = st.session_state.current_question
     
     if current_question < len(quiz.questions):
         question = quiz.questions[current_question]
-        st.markdown(f"### Question {current_question + 1}: {question.question}")
+        
+        # Display current question
+        st.markdown(f"### Question {current_question + 1} of {len(quiz.questions)}")
+        st.markdown(f"**{question.question}**")
         st.markdown(f"**Difficulty:** {question.difficulty}")
 
+        # Display options
         if question.options:
             options = question.options
             selected_option = st.radio("Choose an option:", options, key=f"question_{current_question}")
@@ -249,28 +297,65 @@ if 'generated_quiz' in st.session_state:
             options = ["True", "False"]
             selected_option = st.radio("Choose:", options, key=f"question_{current_question}")
 
-        if st.button("Submit Answer"):
-            correct_answer = question.correct_answer
-            if question.options:
-                selected_index = options.index(selected_option)
-                correct_index = ord(correct_answer.upper()) - ord('A')
-                is_correct = selected_index == correct_index
-            else:
-                is_correct = (selected_option == "True" and correct_answer.upper() == "A") or \
-                             (selected_option == "False" and correct_answer.upper() == "B")
+        # Initialize session states for question flow
+        if 'answer_submitted' not in st.session_state:
+            st.session_state.answer_submitted = False
+        if 'user_answers' not in st.session_state:
+            st.session_state.user_answers = []
 
-            if is_correct:
+        # Reset answer_submitted for new question
+        if len(st.session_state.user_answers) <= current_question:
+            st.session_state.answer_submitted = False
+
+        # Submit answer button - only show if answer not yet submitted
+        if not st.session_state.answer_submitted:
+            if st.button("Submit Answer", key=f"submit_{current_question}"):
+                correct_answer = question.correct_answer
+                if question.options:
+                    selected_index = options.index(selected_option)
+                    correct_index = ord(correct_answer.upper()) - ord('A')
+                    is_correct = selected_index == correct_index
+                else:
+                    is_correct = (selected_option == "True" and correct_answer.upper() == "A") or \
+                                 (selected_option == "False" and correct_answer.upper() == "B")
+
+                # Store the user's answer
+                st.session_state.user_answers.append({
+                    'question_index': current_question,
+                    'selected_option': selected_option,
+                    'is_correct': is_correct
+                })
+
+                if is_correct:
+                    st.session_state.score += 1
+
+                st.session_state.answer_submitted = True
+                st.rerun()
+        
+        # Show feedback and next button after answer is submitted
+        if st.session_state.answer_submitted and len(st.session_state.user_answers) > current_question:
+            user_answer = st.session_state.user_answers[current_question]
+            
+            if user_answer['is_correct']:
                 st.success("Correct!")
-                st.session_state.score += 1
             else:
                 st.error("Incorrect!")
+            
             st.markdown(f"**Explanation:** {question.explanation}")
-            st.session_state.current_question += 1
-
-        if st.session_state.current_question < len(quiz.questions):
-            st.button("Next Question", on_click=lambda: None)
+            
+            # Show next question button or finish quiz
+            if current_question + 1 < len(quiz.questions):
+                if st.button("Next Question", key=f"next_{current_question}"):
+                    st.session_state.current_question += 1
+                    st.session_state.answer_submitted = False  # Reset for next question
+                    st.rerun()
+            else:
+                if st.button("Finish Quiz", key="finish_quiz"):
+                    st.session_state.current_question += 1
+                    st.rerun()
 
     else:
+        # Quiz completed
         st.balloons()
         score = st.session_state.score
         total_questions = len(quiz.questions)
@@ -279,7 +364,7 @@ if 'generated_quiz' in st.session_state:
         st.success(f"Quiz completed! Your score: {score}/{total_questions}")
         st.markdown(f"Percentage: {percentage:.2f}%")
 
-        # Feedback based on percentage (same as in the original script)
+        # Feedback based on percentage
         if percentage >= 90:
             st.markdown("""
             ### Outstanding Performance! 🌟
@@ -323,29 +408,62 @@ if 'generated_quiz' in st.session_state:
             
             Remember, every expert was once a beginner. Your dedication to improvement is what matters most!
             """)
-        if st.button("Review Answers"):
+        
+        # Action buttons
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("Review Answers"):
+                st.session_state.show_review = True
+                st.rerun()
+        
+        with col2:
+            if st.button("Retake Quiz"):
+                st.session_state.current_question = 0
+                st.session_state.score = 0
+                st.session_state.user_answers = []
+                st.session_state.answer_submitted = False
+                if 'show_review' in st.session_state:
+                    del st.session_state.show_review
+                st.rerun()
+        
+        with col3:
+            if st.button("Start New Quiz"):
+                # Clear quiz-related session state but keep PDF
+                keys_to_remove = ['generated_quiz', 'current_question', 'score', 'user_answers', 'show_review', 'answer_submitted']
+                for key in keys_to_remove:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
+
+        # Show review if requested
+        if st.session_state.get('show_review', False):
+            st.markdown("---")
+            st.markdown("## Answer Review")
             for i, question in enumerate(quiz.questions):
                 st.markdown(f"### Question {i+1}: {question.question}")
                 st.markdown(f"**Difficulty:** {question.difficulty}")
+                
                 if question.options:
                     st.write("Options:")
                     for j, option in enumerate(question.options):
                         st.write(f"{chr(65+j)}. {option}")
                 else:
                     st.write("Options: True / False")
+                
                 st.write(f"**Correct Answer:** {question.correct_answer}")
+                
+                # Show user's answer if available
+                if 'user_answers' in st.session_state and i < len(st.session_state.user_answers):
+                    user_answer = st.session_state.user_answers[i]
+                    status = "✅ Correct" if user_answer['is_correct'] else "❌ Incorrect"
+                    st.write(f"**Your Answer:** {user_answer['selected_option']} {status}")
+                
                 st.write(f"**Explanation:** {question.explanation}")
                 st.markdown("---")
-        
-        if st.button("Retake Quiz"):
-            st.session_state.current_question = 0
-            st.session_state.score = 0  # Reset score to allow for a fresh start
-
-        # Option to clear memory
-        if st.button("Clear Memory"):
-            st.session_state.clear()  # Clear all session state
-            st.cache_data.clear()  # Clear cache to reset the app state
-            st.cache_resource.clear()
 
 else:
-    st.write("Please upload a PDF and fill in the quiz parameters to start.")
+    if pdf_file is not None:
+        st.info("Please select your preferred testing mode and click 'Generate Quiz' to start.")
+    else:
+        st.info("Please upload a PDF file to begin.")
