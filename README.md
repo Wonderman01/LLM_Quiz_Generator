@@ -1,0 +1,1 @@
+The LLM adaptive quiz generator is a tool that helps users gain mastery and retention of concepts from their pdf by generating quizzes with blending difficulty levels, providing detailed explanations of answers and evaluating users responses.
